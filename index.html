@@ -455,7 +455,7 @@ tfoot td{font-weight:700;background:var(--surface-2)}
     <div class="card">
       <h3>6. الحفظ والصلاحيات</h3>
       <ul>
-        <li>تحفظ البيانات في متصفح الجهاز المستخدم (Local Storage) وتبقى بعد إغلاق الصفحة.</li>
+        <li>تحفظ البيانات على الخادم وتظهر نفسها على جميع الأجهزة (الكمبيوتر والموبايل)، مع نسخة محلية على الجهاز تتيح العمل دون اتصال ثم تُرفع تلقائياً عند عودة الإنترنت.</li>
         <li>شاشة «النسخ الاحتياطي» تصدّر قاعدة البيانات كاملة إلى ملف JSON وتستعيدها.</li>
         <li>حذف موظف يحذف أهدافه ومبيعاته بعد تأكيد صريح.</li>
         <li>للتشغيل متعدد المستخدمين: تُنقل الطبقة نفسها إلى خادم (API + قاعدة بيانات) دون تغيير المعادلات.</li>
@@ -512,9 +512,49 @@ const prevMonth=m=>{let[y,mm]=m.split("-").map(Number);mm--;if(!mm){mm=12;y--}re
 const daysIn=m=>{const[y,mm]=m.split("-").map(Number);return new Date(y,mm,0).getDate()};
 
 /* ---------- storage ---------- */
+// A local copy keeps the page fast and usable offline; api.php on the server holds the shared copy so every device sees the same data.
 let db;
-function save(){try{localStorage.setItem(LS,JSON.stringify(db))}catch(e){}}
-function load(){try{const s=localStorage.getItem(LS);if(s){db=JSON.parse(s);if(db&&db.employees)return}}catch(e){}db=seedData();save()}
+const API="api.php",SYNC_LS=LS+"_sync",KEY_LS=LS+"_key";
+let sync={rev:0,dirty:false},editSeq=0,pushing=false,pushAgain=false;
+function readSync(){try{const s=JSON.parse(localStorage.getItem(SYNC_LS));if(s&&typeof s.rev==="number")sync=s}catch(e){}}
+function writeSync(){try{localStorage.setItem(SYNC_LS,JSON.stringify(sync))}catch(e){}}
+function cache(){try{localStorage.setItem(LS,JSON.stringify(db))}catch(e){}}
+function save(){cache();editSeq++;sync.dirty=true;writeSync();push()}
+function load(){readSync();try{const s=localStorage.getItem(LS);if(s){db=JSON.parse(s);if(db&&db.employees)return}}catch(e){}db=seedData();cache()}
+function getKey(){try{return localStorage.getItem(KEY_LS)||""}catch(e){return ""}}
+function askKey(){const k=prompt("أدخل كلمة مرور نظام المبيعات");if(!k)return false;try{localStorage.setItem(KEY_LS,k)}catch(e){}return true}
+async function api(method,body){
+  const h={"Content-Type":"application/json"},k=getKey();if(k)h["X-Access-Key"]=k;
+  const res=await fetch(API+(method==="GET"?"?t="+Date.now():""),{method,headers:h,cache:"no-store",body:body?JSON.stringify(body):undefined});
+  if(res.status===401){if(askKey())return api(method,body);throw new Error("auth")}
+  if(res.status===409)return {conflict:await res.json()};
+  if(!res.ok)throw new Error("http "+res.status);
+  return await res.json();
+}
+function refreshView(){const a=document.activeElement;if(a&&/^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)&&a.closest(".view.active"))return;RENDER[current]&&RENDER[current]()}
+function adopt(s){db=s.data;sync={rev:s.rev,dirty:false};writeSync();cache();refreshView()}
+async function push(){
+  if(pushing){pushAgain=true;return}
+  pushing=true;const seq=editSeq;
+  try{
+    const r=await api("POST",{rev:sync.rev,data:db});
+    if(r.conflict){if(r.conflict.data){toast("تم تحديث البيانات من جهاز آخر. راجع آخر تعديل وأعد إدخاله إن لزم.");adopt(r.conflict)}else{sync.rev=r.conflict.rev;pushAgain=true}}
+    else{sync.rev=r.rev;sync.dirty=editSeq!==seq;writeSync()}
+  }catch(e){/* offline or no server: stays marked unsaved and is retried on the next sync */}
+  pushing=false;
+  if(pushAgain){pushAgain=false;if(sync.dirty)push()}
+}
+async function pull(){
+  if(pushing)return;
+  let r;try{r=await api("GET")}catch(e){return}
+  if(!r||r.data==null){sync.dirty=true;writeSync();push();return} // empty server: upload this device's data
+  if(r.rev===sync.rev){if(sync.dirty)push();return}
+  if(sync.dirty&&sync.rev>0)toast("تم تحديث البيانات من جهاز آخر. راجع آخر تعديل وأعد إدخاله إن لزم.");
+  adopt(r);
+}
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)pull()});
+window.addEventListener("online",pull);
+setInterval(()=>{if(!document.hidden)pull()},30000);
 
 function seedData(){
   let s=20261;const r=()=>{s=(s*16807)%2147483647;return (s-1)/2147483646};
@@ -934,12 +974,12 @@ document.addEventListener("click",e=>{const b=e.target.closest("[data-pdf],[data
 function download(text,name,type){const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},500)}
 $("#bkExport").onclick=()=>download(JSON.stringify(db,null,2),"albayan_sales_backup_"+ymd(TODAY)+".json","application/json");
 $("#bkImport").onchange=ev=>{const f=ev.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(!d.employees||!d.sales||!d.targets)throw 0;db=d;save();toast("تمت استعادة البيانات بنجاح");go("home")}catch(x){toast("الملف غير صالح. اختر ملف نسخة احتياطية صادراً من هذا النظام.")}};r.readAsText(f);ev.target.value=""};
-$("#bkClear").onclick=()=>ask("حذف كل البيانات؟","سيتم حذف جميع الموظفين والأهداف والمبيعات من هذا الجهاز. ننصح بتنزيل نسخة احتياطية أولاً.",()=>{db={sample:false,employees:[],targets:[],sales:[]};save();toast("تم حذف جميع البيانات");go("home")});
+$("#bkClear").onclick=()=>ask("حذف كل البيانات؟","سيتم حذف جميع الموظفين والأهداف والمبيعات من النظام على جميع الأجهزة. ننصح بتنزيل نسخة احتياطية أولاً.",()=>{db={sample:false,employees:[],targets:[],sales:[]};save();toast("تم حذف جميع البيانات");go("home")});
 $("#bkSeed").onclick=()=>{db=seedData();save();toast("تم تحميل البيانات التجريبية");go("home")};
 
 /* ---------- init ---------- */
 const RENDER={home:renderHome,employees:renderEmployees,profile:renderProfile,targets:renderTargets,sales:renderSales,monthly:renderMonthly,annual:renderAnnual,dashboard:renderDashboard,finance:renderFinance};
-load();renderTiles();
+load();renderTiles();pull();
 $("#todayLbl").textContent=TODAY.toLocaleDateString("ar-AE",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
 renderHome();
 </script>
