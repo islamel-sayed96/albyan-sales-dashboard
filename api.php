@@ -16,7 +16,16 @@ $PASSWORD = '';
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store, no-cache, must-revalidate');
 
-$dir  = __DIR__ . '/data';
+// Keep the data OUTSIDE the deployed folder (one level above public_html) so a new
+// deploy from GitHub never overwrites or deletes it. Falls back to ./data if that
+// location is not writable.
+$dir = dirname(__DIR__) . '/albyan_sales_data';
+if (!is_dir($dir) && !@mkdir($dir, 0755, true)) {
+    $dir = __DIR__ . '/data';
+}
+if (!is_writable($dir) && is_dir($dir)) {
+    $dir = __DIR__ . '/data';
+}
 $file = $dir . '/db.json';
 
 if (!is_dir($dir)) {
